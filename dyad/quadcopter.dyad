@@ -1,0 +1,68 @@
+"""
+Quadcopter, ArduPilot Quad-X layout (FRAME_CLASS = 1, FRAME_TYPE = 1).
+
+Motor order and spin (seen from above), as in ArduPilot AP_MotorsMatrix:
+  motor 1  front-right  counter-clockwise
+  motor 2  rear-left    counter-clockwise
+  motor 3  front-left   clockwise
+  motor 4  rear-right   clockwise
+
+All rotor units are fed from one LiPo pack. The vehicle starts resting on its
+landing gear at the static spring deflection.
+"""
+component Quadcopter
+  "Servo pulse widths for motors 1..4 (microseconds)"
+  pwm = [RealInput() for i in 1:4]
+  "Total vehicle mass"
+  parameter mass::Mass = 1.2
+  "Arm length, centre of mass to motor axis"
+  parameter arm_length::Length = 0.225
+  "Height of the rotor hubs above the centre of mass"
+  parameter hub_height::Length = 0.03
+  "Foot height below the centre of mass"
+  parameter z_foot::Length = 0.1
+  "Landing-gear stiffness per foot"
+  parameter k_gear::TranslationalSpringConstant = 600.0
+  "Initial heading (yaw)"
+  parameter yaw0::Angle = 0.0
+  "Air density"
+  parameter rho::Density = 1.225
+  "Wind velocity, NED"
+  parameter wind_ned::Velocity[3] = [0.0, 0.0, 0.0]
+  "Hub offset along body x and y"
+  final parameter l_xy::Length = arm_length / sqrt(2.0)
+  airframe = Airframe6DOF(m = mass, r0 = [0.0, 0.0, -(z_foot - mass * 9.80665 / (4 * k_gear))], rpy0 = [0.0, 0.0, yaw0])
+  gear = LandingGear(z_foot = z_foot, k = k_gear)
+  battery = LiPoBattery()
+  ground = ElectricalComponents.Analog.Basic.Ground()
+  rotor1 = RotorUnit(r_hub = [l_xy, l_xy, -hub_height], spin = -1.0, wind_ned = wind_ned, rho = rho)
+  rotor2 = RotorUnit(r_hub = [-l_xy, -l_xy, -hub_height], spin = -1.0, wind_ned = wind_ned, rho = rho)
+  rotor3 = RotorUnit(r_hub = [l_xy, -l_xy, -hub_height], spin = 1.0, wind_ned = wind_ned, rho = rho)
+  rotor4 = RotorUnit(r_hub = [-l_xy, l_xy, -hub_height], spin = 1.0, wind_ned = wind_ned, rho = rho)
+relations
+  # Mechanical: everything attaches to the airframe
+  connect(airframe.port, gear.port, rotor1.mount, rotor2.mount, rotor3.mount, rotor4.mount)
+  # Electrical: common DC bus
+  connect(battery.p, rotor1.dc_p, rotor2.dc_p, rotor3.dc_p, rotor4.dc_p)
+  connect(battery.n, rotor1.dc_n, rotor2.dc_n, rotor3.dc_n, rotor4.dc_n, ground.g)
+  # Commands
+  connect(pwm[1], rotor1.pwm)
+  connect(pwm[2], rotor2.pwm)
+  connect(pwm[3], rotor3.pwm)
+  connect(pwm[4], rotor4.pwm)
+end
+
+"""
+Top-level model stepped by the ArduPilot JSON SITL bridge. The four PWM
+values are tunable parameters, updated by the bridge before every step
+(zero-order hold over one SITL frame).
+"""
+component QuadcopterSITL
+  "PWM pulse widths from ArduPilot, motors 1..4 (microseconds)"
+  parameter pwm_cmd::Real[4] = [1000.0, 1000.0, 1000.0, 1000.0]
+  quad = Quadcopter()
+relations
+  for i in 1:4
+    quad.pwm[i] = pwm_cmd[i]
+  end
+end

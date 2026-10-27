@@ -1,0 +1,180 @@
+"""
+Body-fixed mechanical port of a rigid airframe.
+
+Conventions (ArduPilot): world frame is NED (north, east, down), body frame is
+FRD (forward, right, down). The airframe owns the potentials; every other
+component reads them and returns the force/torque it needs through the flows.
+
+Flow sign convention (same as Frame3D): `f` and `tau` are the force and the
+torque exerted ON the component THROUGH the port, resolved in the body frame,
+torque taken about the airframe centre of mass. A massless element that applies
+an external force F at body point r therefore sets f = -F and tau = -(r x F).
+"""
+connector BodyPort
+  "Position of the airframe centre of mass in the NED world frame"
+  potential r::Position[3]
+  "Direction cosine matrix body (FRD) -> world (NED): x_ned = R * x_body"
+  potential R::Real[3, 3]
+  "Velocity of the centre of mass, resolved in the body frame"
+  potential v::Velocity[3]
+  "Angular velocity of the body, resolved in the body frame"
+  potential w::AngularVelocity[3]
+  "Force exerted on the component through the port, resolved in the body frame"
+  flow f::Force[3]
+  "Torque about the centre of mass exerted on the component through the port, resolved in the body frame"
+  flow tau::Torque[3]
+end
+
+"""
+Rigid-body 6-DOF airframe in NED/FRD.
+
+States: NED position, NED velocity, attitude quaternion q = [w, x, y, z]
+(rotation body -> NED, scalar first, ArduPilot convention) and body angular
+rates [p, q, r]. Gravity acts at the centre of mass. All other loads arrive
+through `port`.
+
+The quaternion norm is held at 1 by a first-order correction term
+k_quat * (1 - |q|^2) * q, which is zero on the unit sphere.
+"""
+component Airframe6DOF
+  port = BodyPort()
+  "Total vehicle mass"
+  parameter m::Mass = 1.2
+  "Principal moment of inertia about body x (roll)"
+  parameter Ixx::Inertia = 0.0115
+  "Principal moment of inertia about body y (pitch)"
+  parameter Iyy::Inertia = 0.0115
+  "Principal moment of inertia about body z (yaw)"
+  parameter Izz::Inertia = 0.022
+  "Gravitational acceleration"
+  parameter g::Acceleration = 9.80665
+  "Quaternion norm correction gain"
+  parameter k_quat::Real(units = "s-1") = 1.0
+  "Initial NED position of the centre of mass"
+  parameter r0::Position[3] = [0.0, 0.0, 0.0]
+  "Initial NED velocity"
+  parameter v0::Velocity[3] = [0.0, 0.0, 0.0]
+  "Initial roll, pitch, yaw (ZYX Euler angles)"
+  parameter rpy0::Angle[3] = [0.0, 0.0, 0.0]
+  "Initial body angular rates [p, q, r]"
+  parameter w0::AngularVelocity[3] = [0.0, 0.0, 0.0]
+  "NED position of the centre of mass"
+  variable r_ned::Position[3]
+  "NED velocity of the centre of mass"
+  variable v_ned::Velocity[3]
+  "Attitude quaternion body -> NED, [w, x, y, z]"
+  variable q::Real[4]
+  "Body angular rates [p, q, r] (FRD)"
+  variable w::AngularVelocity[3]
+  "Direction cosine matrix body -> NED"
+  variable R::Real[3, 3]
+  "Velocity of the centre of mass resolved in the body frame"
+  variable v_b::Velocity[3]
+  "Sum of non-gravitational forces on the airframe, body frame"
+  variable f_b::Force[3]
+  "Sum of torques about the centre of mass, body frame"
+  variable tau_b::Torque[3]
+  "Specific force measured by an IMU at the centre of mass, body frame"
+  variable accel_body::Acceleration[3]
+  "Roll, pitch, yaw (ZYX Euler angles)"
+  variable rpy::Angle[3]
+  "Squared quaternion norm"
+  variable qn2::Real
+relations
+  for i in 1:3
+    initial r_ned[i] = r0[i]
+    initial v_ned[i] = v0[i]
+    initial w[i] = w0[i]
+  end
+  initial q[1] = cos(rpy0[1] / 2) * cos(rpy0[2] / 2) * cos(rpy0[3] / 2) + sin(rpy0[1] / 2) * sin(rpy0[2] / 2) * sin(rpy0[3] / 2)
+  initial q[2] = sin(rpy0[1] / 2) * cos(rpy0[2] / 2) * cos(rpy0[3] / 2) - cos(rpy0[1] / 2) * sin(rpy0[2] / 2) * sin(rpy0[3] / 2)
+  initial q[3] = cos(rpy0[1] / 2) * sin(rpy0[2] / 2) * cos(rpy0[3] / 2) + sin(rpy0[1] / 2) * cos(rpy0[2] / 2) * sin(rpy0[3] / 2)
+  initial q[4] = cos(rpy0[1] / 2) * cos(rpy0[2] / 2) * sin(rpy0[3] / 2) - sin(rpy0[1] / 2) * sin(rpy0[2] / 2) * cos(rpy0[3] / 2)
+  # Direction cosine matrix body -> NED from the unit quaternion
+  R[1, 1] = q[1] ^ 2 + q[2] ^ 2 - q[3] ^ 2 - q[4] ^ 2
+  R[1, 2] = 2 * (q[2] * q[3] - q[1] * q[4])
+  R[1, 3] = 2 * (q[2] * q[4] + q[1] * q[3])
+  R[2, 1] = 2 * (q[2] * q[3] + q[1] * q[4])
+  R[2, 2] = q[1] ^ 2 - q[2] ^ 2 + q[3] ^ 2 - q[4] ^ 2
+  R[2, 3] = 2 * (q[3] * q[4] - q[1] * q[2])
+  R[3, 1] = 2 * (q[2] * q[4] - q[1] * q[3])
+  R[3, 2] = 2 * (q[3] * q[4] + q[1] * q[2])
+  R[3, 3] = q[1] ^ 2 - q[2] ^ 2 - q[3] ^ 2 + q[4] ^ 2
+  # Body-frame velocity: v_b = R' * v_ned
+  for i in 1:3
+    v_b[i] = R[1, i] * v_ned[1] + R[2, i] * v_ned[2] + R[3, i] * v_ned[3]
+  end
+  # Port potentials
+  port.r = r_ned
+  port.R = R
+  port.v = v_b
+  port.w = w
+  # Loads from attached components (flow = load on this component)
+  f_b = port.f
+  tau_b = port.tau
+  # Translational dynamics in NED
+  der(r_ned) = v_ned
+  # (gravity acts along +down; f_b holds only the IMU-sensed loads)
+  m * der(v_ned[1]) = R[1, 1] * f_b[1] + R[1, 2] * f_b[2] + R[1, 3] * f_b[3]
+  m * der(v_ned[2]) = R[2, 1] * f_b[1] + R[2, 2] * f_b[2] + R[2, 3] * f_b[3]
+  m * der(v_ned[3]) = R[3, 1] * f_b[1] + R[3, 2] * f_b[2] + R[3, 3] * f_b[3] + m * g
+  # Attitude kinematics: dq/dt = 0.5 * q (x) [0, w] + norm correction
+  qn2 = q[1] ^ 2 + q[2] ^ 2 + q[3] ^ 2 + q[4] ^ 2
+  der(q[1]) = 0.5 * (-q[2] * w[1] - q[3] * w[2] - q[4] * w[3]) + k_quat * (1 - qn2) * q[1]
+  der(q[2]) = 0.5 * (q[1] * w[1] + q[3] * w[3] - q[4] * w[2]) + k_quat * (1 - qn2) * q[2]
+  der(q[3]) = 0.5 * (q[1] * w[2] - q[2] * w[3] + q[4] * w[1]) + k_quat * (1 - qn2) * q[3]
+  der(q[4]) = 0.5 * (q[1] * w[3] + q[2] * w[2] - q[3] * w[1]) + k_quat * (1 - qn2) * q[4]
+  # Euler's rotation equations (principal axes)
+  Ixx * der(w[1]) = tau_b[1] - (Izz - Iyy) * w[2] * w[3]
+  Iyy * der(w[2]) = tau_b[2] - (Ixx - Izz) * w[3] * w[1]
+  Izz * der(w[3]) = tau_b[3] - (Iyy - Ixx) * w[1] * w[2]
+  # IMU specific force (excludes gravity)
+  accel_body = f_b / m
+  # Euler angles for output
+  rpy[1] = atan(2 * (q[1] * q[2] + q[3] * q[4]), 1 - 2 * (q[2] ^ 2 + q[3] ^ 2))
+  rpy[2] = asin(max(-1.0, min(1.0, 2 * (q[1] * q[3] - q[4] * q[2]))))
+  rpy[3] = atan(2 * (q[1] * q[4] + q[2] * q[3]), 1 - 2 * (q[3] ^ 2 + q[4] ^ 2))
+end
+
+"""
+Quadratic parasitic drag of the fuselage, acting at the centre of mass.
+Each body axis has its own drag area: F_i = -0.5*rho*CdA_i*u_i*|u_i|,
+with u the air-relative velocity in the body frame (|u_i| smoothed by v_eps).
+"""
+component FuselageDrag
+  port = BodyPort()
+  "Drag area (Cd * reference area) along body x, y, z"
+  parameter CdA::Area[3] = [0.02, 0.02, 0.04]
+  "Air density"
+  parameter rho::Density = 1.225
+  "Wind velocity, NED"
+  parameter wind_ned::Velocity[3] = [0.0, 0.0, 0.0]
+  "Smoothing velocity for |u|"
+  parameter v_eps::Velocity = 0.01
+  "Air-relative velocity of the centre of mass, body frame"
+  variable u_air::Velocity[3]
+  "Drag force on the airframe, body frame"
+  variable F::Force[3]
+relations
+  for i in 1:3
+    u_air[i] = port.v[i] - (port.R[1, i] * wind_ned[1] + port.R[2, i] * wind_ned[2] + port.R[3, i] * wind_ned[3])
+    F[i] = -0.5 * rho * CdA[i] * u_air[i] * sqrt(u_air[i] ^ 2 + v_eps ^ 2)
+  end
+  port.f = -F
+  port.tau = [0.0, 0.0, 0.0]
+end
+
+"""
+Constant force and torque applied to the airframe at its centre of mass,
+both resolved in the body frame. Useful as a disturbance or test load.
+"""
+component BodyWrench
+  port = BodyPort()
+  "Force applied to the airframe, body frame"
+  parameter F::Force[3] = [0.0, 0.0, 0.0]
+  "Torque applied to the airframe about its centre of mass, body frame"
+  parameter M::Torque[3] = [0.0, 0.0, 0.0]
+relations
+  port.f = -F
+  port.tau = -M
+end

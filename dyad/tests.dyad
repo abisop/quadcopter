@@ -1,0 +1,149 @@
+# ---------------------------------------------------------------------------
+# Airframe6DOF validation
+# ---------------------------------------------------------------------------
+
+"Torque-free asymmetric rigid body in free fall: energy, |H| and |q| must be conserved"
+test component TestAirframeTorqueFree
+  airframe = Airframe6DOF(Ixx = 0.01, Iyy = 0.02, Izz = 0.03, w0 = [1.0, 0.5, 2.0], rpy0 = [0.3, -0.2, 1.0])
+  load = BodyWrench()
+relations
+  connect(airframe.port, load.port)
+end
+
+analysis TestAirframeTorqueFreeRun
+  extends TransientAnalysis(stop = 5.0, abstol = 1e-10, reltol = 1e-10)
+  model = TestAirframeTorqueFree()
+end
+
+"Rolled 30 deg, body-frame thrust = weight, constant yaw torque"
+test component TestAirframeTiltedThrust
+  airframe = Airframe6DOF(rpy0 = [0.5235987755982988, 0.0, 0.0])
+  load = BodyWrench(F = [0.0, 0.0, -11.76798], M = [0.0, 0.0, 0.01])
+relations
+  connect(airframe.port, load.port)
+end
+
+analysis TestAirframeTiltedThrustRun
+  extends TransientAnalysis(stop = 2.0, abstol = 1e-10, reltol = 1e-10)
+  model = TestAirframeTiltedThrust()
+end
+
+# ---------------------------------------------------------------------------
+# LandingGear validation
+# ---------------------------------------------------------------------------
+
+"Drop from 5 cm with 5 deg roll and 0.5 m/s north velocity: must settle level, stop, rest at static deflection"
+test component TestLandingGearDrop
+  airframe = Airframe6DOF(r0 = [0.0, 0.0, -0.15], v0 = [0.5, 0.0, 0.0], rpy0 = [0.0872664626, 0.0, 0.0])
+  gear = LandingGear()
+relations
+  connect(airframe.port, gear.port)
+end
+
+analysis TestLandingGearDropRun
+  extends TransientAnalysis(stop = 3.0)
+  model = TestLandingGearDrop()
+end
+
+# ---------------------------------------------------------------------------
+# LiPoBattery validation
+# ---------------------------------------------------------------------------
+
+"Constant 10 A discharge of a 3S 3 Ah pack for 10 minutes"
+test component TestBatteryDischarge
+  battery = LiPoBattery()
+  load = ElectricalComponents.Analog.Sources.CurrentSource()
+  current = BlockComponents.Sources.Constant(k = 10.0)
+  ground = ElectricalComponents.Analog.Basic.Ground()
+relations
+  connect(current.y, load.I)
+  connect(battery.p, load.p)
+  connect(load.n, battery.n, ground.g)
+end
+
+analysis TestBatteryDischargeRun
+  extends TransientAnalysis(stop = 600.0)
+  model = TestBatteryDischarge()
+end
+
+# ---------------------------------------------------------------------------
+# RotorUnit (ESC + BLDC motor + propeller) validation on a test stand
+# ---------------------------------------------------------------------------
+
+"Rotor unit on a stand moving at v_stand through still air, ideal 11.1 V bus, fixed PWM"
+test component TestRotor
+  "Stand velocity, body frame"
+  parameter v_stand::Velocity[3] = [0.0, 0.0, 0.0]
+  "Stand angular velocity, body frame"
+  parameter w_stand::AngularVelocity[3] = [0.0, 0.0, 0.0]
+  "PWM command"
+  parameter pwm::Real = 1500.0
+  stand = TestStand(v_body = v_stand, w_body = w_stand)
+  rotor = RotorUnit(spin = 1.0)
+  supply = ElectricalComponents.Analog.Sources.VoltageSource()
+  vbus = BlockComponents.Sources.Constant(k = 11.1)
+  throttle = BlockComponents.Sources.Constant(k = pwm)
+  ground = ElectricalComponents.Analog.Basic.Ground()
+relations
+  connect(vbus.y, supply.V)
+  connect(supply.p, rotor.dc_p)
+  connect(supply.n, rotor.dc_n, ground.g)
+  connect(throttle.y, rotor.pwm)
+  connect(rotor.mount, stand.port)
+end
+
+analysis TestRotorStaticRun
+  extends TransientAnalysis(stop = 2.0)
+  model = TestRotor()
+end
+
+analysis TestRotorClimbRun
+  extends TransientAnalysis(stop = 2.0)
+  model = TestRotor(v_stand = [0.0, 0.0, -5.0])
+end
+
+analysis TestRotorForwardRun
+  extends TransientAnalysis(stop = 2.0)
+  model = TestRotor(v_stand = [5.0, 0.0, 0.0])
+end
+
+analysis TestRotorGyroRun
+  extends TransientAnalysis(stop = 2.0)
+  model = TestRotor(w_stand = [1.0, 0.0, 0.0])
+end
+
+# ---------------------------------------------------------------------------
+# FuselageDrag validation: stand moving at [4, -3, 1] m/s in a [2, 0, 0] m/s wind
+# ---------------------------------------------------------------------------
+
+test component TestFuselageDrag
+  stand = TestStand(v_body = [4.0, -3.0, 1.0])
+  drag = FuselageDrag(wind_ned = [2.0, 0.0, 0.0])
+  "dummy state so the purely algebraic test has something to integrate"
+  variable x::Real
+relations
+  initial x = 0.0
+  der(x) = 1.0
+  connect(stand.port, drag.port)
+end
+
+analysis TestFuselageDragRun
+  extends TransientAnalysis(stop = 0.1)
+  model = TestFuselageDrag()
+end
+
+# ---------------------------------------------------------------------------
+# Quadcopter assembly
+# ---------------------------------------------------------------------------
+
+"Disarmed (1000 us): must stay at rest on the gear"
+analysis TestQuadRestRun
+  extends TransientAnalysis(stop = 5.0)
+  model = QuadcopterSITL()
+end
+
+"Equal throttle 1600 us: vertical take-off and climb without attitude change"
+analysis TestQuadTakeoffRun
+  extends TransientAnalysis(stop = 4.0)
+  model = QuadcopterSITL(pwm_cmd = [1600.0, 1600.0, 1600.0, 1600.0])
+end

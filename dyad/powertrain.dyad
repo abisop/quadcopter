@@ -1,0 +1,272 @@
+"""
+Averaged electronic speed controller (synchronous buck, lossless).
+
+The PWM pulse width sets the duty cycle u = clamp((pwm - pwm_min)/(pwm_max - pwm_min), 0, 1).
+Output voltage v_out = u * v_in; input current follows from power balance,
+i_in = u * i_out. Current may reverse (active braking / "damped light").
+Input and output share the negative rail `n`.
+"""
+component ESC
+  "DC bus positive input"
+  p_in = Pin()
+  "Motor-side positive output"
+  p_out = Pin()
+  "Common negative rail"
+  n = Pin()
+  "Servo pulse width command (microseconds)"
+  pwm = RealInput()
+  "Pulse width for zero throttle"
+  parameter pwm_min::Real = 1000.0
+  "Pulse width for full throttle"
+  parameter pwm_max::Real = 2000.0
+  "Duty cycle (throttle) 0..1"
+  variable u::Real
+  "DC bus voltage"
+  variable v_in::Voltage
+  "Average motor voltage"
+  variable v_out::Voltage
+relations
+  u = max(0.0, min(1.0, (pwm - pwm_min) / (pwm_max - pwm_min)))
+  v_in = p_in.v - n.v
+  v_out = p_out.v - n.v
+  v_out = u * v_in
+  p_in.i = -u * p_out.i
+  p_in.i + p_out.i + n.i = 0
+end
+
+"""
+Brushless DC motor, DC-equivalent model: winding resistance, back-EMF and
+viscous bearing/iron loss between rotor and housing. Winding inductance is
+omitted (electrical time constant ~0.1 ms, well below the 2.5 ms SITL step).
+The rotor inertia belongs to the attached propeller.
+"""
+component BLDCMotor
+  p = Pin()
+  n = Pin()
+  "Rotor shaft"
+  shaft = Spline()
+  "Stator housing (reaction torque)"
+  housing = Spline()
+  "Velocity constant (rpm per volt)"
+  parameter Kv::Real = 920.0
+  "Phase-equivalent winding resistance"
+  parameter R::Resistance = 0.11
+  "Viscous loss coefficient (0.5 A no-load current at ~1000 rad/s)"
+  parameter d::RotationalDampingConstant = 5.4e-6
+  "Torque / back-EMF constant"
+  final parameter k::ElectricalTorqueConstant = 60.0 / (2.0 * π * Kv)
+  resistor = ElectricalComponents.Analog.Basic.Resistor(R = R)
+  emf = ElectricalComponents.Analog.Basic.RotationalEMF(k = k)
+  friction = RotationalComponents.Components.Damper(d = d)
+relations
+  connect(p, resistor.p)
+  connect(resistor.n, emf.p)
+  connect(emf.n, n)
+  connect(emf.rotor, friction.spline_a, shaft)
+  connect(emf.housing, friction.spline_b, housing)
+end
+
+"""
+Fixed-pitch propeller with blade-element / momentum aerodynamics and
+dynamic (uniform) inflow, mounted at body point r_hub with thrust along -z_body.
+
+Blade element (linear twist, uniform inflow), dimensional form so that a
+stopped rotor is well defined:
+  T = rho*A*(sigma*a/2) * [theta75/3*(OR)^2 + cf*Vxy_eff^2 - (Vc + vi)*OR/2],
+  cf = (theta75 - theta_tw/4)/2,  OR = Omega*R,
+  Vxy_eff^2 = Vxy^2 * OR^2 / (OR^2 + Vxy^2/mu_max^2)  (caps advance ratio at mu_max)
+Dynamic inflow (Pitt-Peters apparent mass m_a = 8/3*rho*R^3):
+  m_a * dvi/dt = T - 2*rho*A*vi*sqrt(Vxy^2 + (Vc + vi)^2)
+Shaft torque = induced/climb power + profile power:
+  Q = (Vc + vi)*T/Omega + rho*A*R*sigma*Cd0/8 * OR*|OR|*(1 + 4.65*mu_eff^2)
+Rotor drag (H-force): F_H = -k_H * Omega * (in-plane air-relative velocity).
+
+theta75 and Cd0 are calibrated so that static thrust and power equal the
+propeller-convention coefficients CT0 (T = CT0*rho*n^2*D^4) and CP0
+(P = CP0*rho*n^3*D^5).
+
+Rotor spin: angular velocity = spin * Omega * z_body (spin = +1 clockwise seen
+from above, -1 counter-clockwise). The rotor inertia J carries the spin
+momentum; its gyroscopic moment and the motor housing reaction (support) are
+transferred to the airframe through `mount`.
+"""
+component Propeller
+  "Rotor side of the motor shaft"
+  shaft = Spline()
+  "Motor housing side (fixed to the airframe)"
+  support = Spline()
+  "Attachment to the airframe"
+  mount = BodyPort()
+  "Hub position relative to the centre of mass, body frame"
+  parameter r_hub::Position[3] = [0.159, 0.159, -0.03]
+  "Spin direction: +1 clockwise seen from above (about +z_body), -1 counter-clockwise"
+  parameter spin::Real = 1.0
+  "Propeller diameter"
+  parameter D::Length = 0.254
+  "Blade solidity (blade area / disc area)"
+  parameter sigma::Real = 0.095
+  "Blade section lift-curve slope"
+  parameter a_lift::Real(units = "rad-1") = 5.7
+  "Linear blade twist, root to tip"
+  parameter theta_tw::Angle = -0.27
+  "Static thrust coefficient, T = CT0*rho*n^2*D^4"
+  parameter CT0::Real = 0.115
+  "Static power coefficient, P = CP0*rho*n^3*D^5"
+  parameter CP0::Real = 0.048
+  "Rotor-drag coefficient, F_H = -k_H*Omega*V_inplane"
+  parameter k_H::Real(units = "N.s2/m") = 2e-4
+  "Advance ratio above which forward-flight terms saturate"
+  parameter mu_max::Real = 0.6
+  "Rotating inertia (propeller + motor bell)"
+  parameter J::Inertia = 3.5e-5
+  "Air density"
+  parameter rho::Density = 1.225
+  "Wind velocity, NED"
+  parameter wind_ned::Velocity[3] = [0.0, 0.0, 0.0]
+  "Smoothing velocity in the momentum-theory mass flow"
+  parameter v_eps::Velocity = 0.1
+  "Rotor radius"
+  final parameter Rp::Length = D / 2
+  "Disc area"
+  final parameter A::Area = π * Rp ^ 2
+  "Static rotor thrust coefficient, T/(rho*A*(Omega*R)^2)"
+  final parameter CTr::Real = CT0 * 4 / π ^ 3
+  "Static rotor torque coefficient, Q/(rho*A*(Omega*R)^2*R)"
+  final parameter CQr::Real = CP0 * 4 / π ^ 4
+  "Static (hover) inflow ratio"
+  final parameter lambda_h::Real = sqrt(CTr / 2)
+  "Effective blade pitch at 75% radius from the zero-lift line"
+  final parameter theta75::Angle = 3 * (CTr / (sigma * a_lift / 2) + lambda_h / 2)
+  "Blade profile drag coefficient"
+  final parameter Cd0::Real = 8 * (CQr - lambda_h * CTr) / sigma
+  "Forward-flight thrust coefficient"
+  final parameter cf::Angle = (theta75 - theta_tw / 4) / 2
+  "Apparent mass of the inflow"
+  final parameter m_a::Mass = 8 / 3 * rho * Rp ^ 3
+  "Rotor angle relative to the airframe"
+  variable phi::Angle
+  "Rotor speed relative to the airframe"
+  variable Omega::AngularVelocity
+  "Induced velocity through the disc"
+  variable v_i::Velocity
+  "Air-relative hub velocity, body frame"
+  variable u_air::Velocity[3]
+  "Climb velocity along the thrust axis"
+  variable V_c::Velocity
+  "Squared in-plane air speed"
+  variable V_xy2::Real(units = "m2/s2")
+  "Blade tip speed"
+  variable OR::Velocity
+  "Advance-ratio saturation denominator"
+  variable den::Real(units = "m2/s2")
+  "Thrust divided by rotor speed"
+  variable T_per_Omega::Real(units = "N.s")
+  "Thrust (along -z_body)"
+  variable T::Force
+  "Aerodynamic shaft torque opposing rotation"
+  variable Q::Torque
+  "Aerodynamic shaft power"
+  variable P_aero::Power
+  "Momentum-theory mass-flow velocity"
+  variable V_T::Velocity
+  "Total aerodynamic force on the airframe, body frame"
+  variable F_aero::Force[3]
+  "Spin angular momentum along z_body"
+  variable h_z::AngularMomentum
+relations
+  initial phi = 0.0
+  initial Omega = 0.0
+  initial v_i = 0.0
+  # Rotor kinematics relative to the airframe
+  support.phi = 0.0
+  phi = shaft.phi - support.phi
+  Omega = der(phi)
+  J * der(Omega) = shaft.tau - Q
+  # Air-relative hub velocity: v + w x r_hub - R' * wind
+  u_air[1] = mount.v[1] + mount.w[2] * r_hub[3] - mount.w[3] * r_hub[2] - (mount.R[1, 1] * wind_ned[1] + mount.R[2, 1] * wind_ned[2] + mount.R[3, 1] * wind_ned[3])
+  u_air[2] = mount.v[2] + mount.w[3] * r_hub[1] - mount.w[1] * r_hub[3] - (mount.R[1, 2] * wind_ned[1] + mount.R[2, 2] * wind_ned[2] + mount.R[3, 2] * wind_ned[3])
+  u_air[3] = mount.v[3] + mount.w[1] * r_hub[2] - mount.w[2] * r_hub[1] - (mount.R[1, 3] * wind_ned[1] + mount.R[2, 3] * wind_ned[2] + mount.R[3, 3] * wind_ned[3])
+  V_c = -u_air[3]
+  V_xy2 = u_air[1] ^ 2 + u_air[2] ^ 2
+  OR = Omega * Rp
+  den = OR ^ 2 + V_xy2 / mu_max ^ 2 + 1e-6
+  # Blade-element thrust
+  T_per_Omega = rho * A * (sigma * a_lift / 2) * Rp * (theta75 / 3 * OR + cf * V_xy2 * OR / den - (V_c + v_i) / 2)
+  T = Omega * T_per_Omega
+  # Dynamic inflow (momentum theory, Glauert mass flow)
+  V_T = sqrt(V_xy2 + (V_c + v_i) ^ 2 + v_eps ^ 2)
+  m_a * der(v_i) = T - 2 * rho * A * v_i * V_T
+  # Shaft torque: induced + climb power, profile power
+  Q = (V_c + v_i) * T_per_Omega + rho * A * Rp * (sigma * Cd0 / 8) * OR * abs(OR) * (1 + 4.65 * V_xy2 / den)
+  P_aero = Q * Omega
+  # Aerodynamic force on the airframe: thrust along -z, rotor drag in-plane
+  F_aero[1] = -k_H * Omega * u_air[1]
+  F_aero[2] = -k_H * Omega * u_air[2]
+  F_aero[3] = -T
+  # Spin momentum (gyroscopic coupling)
+  h_z = J * spin * Omega
+  # Loads returned through the mount (massless in translation):
+  # tau = -support.tau * n_spin + w x h - r_hub x F_aero
+  mount.f = -F_aero
+  mount.tau[1] = mount.w[2] * h_z - (r_hub[2] * F_aero[3] - r_hub[3] * F_aero[2])
+  mount.tau[2] = -mount.w[1] * h_z - (r_hub[3] * F_aero[1] - r_hub[1] * F_aero[3])
+  mount.tau[3] = -support.tau * spin - (r_hub[1] * F_aero[2] - r_hub[2] * F_aero[1])
+end
+
+"""
+One propulsion unit: ESC -> BLDC motor -> propeller, fed from the DC bus and
+commanded by a servo pulse width.
+"""
+component RotorUnit
+  "DC bus positive"
+  dc_p = Pin()
+  "DC bus negative"
+  dc_n = Pin()
+  "Servo pulse width command (microseconds)"
+  pwm = RealInput()
+  "Attachment to the airframe"
+  mount = BodyPort()
+  "Hub position relative to the centre of mass, body frame"
+  parameter r_hub::Position[3] = [0.159, 0.159, -0.03]
+  "Spin direction: +1 clockwise seen from above, -1 counter-clockwise"
+  parameter spin::Real = 1.0
+  "Wind velocity, NED"
+  parameter wind_ned::Velocity[3] = [0.0, 0.0, 0.0]
+  "Air density"
+  parameter rho::Density = 1.225
+  esc = ESC()
+  motor = BLDCMotor()
+  prop = Propeller(r_hub = r_hub, spin = spin, wind_ned = wind_ned, rho = rho)
+relations
+  connect(pwm, esc.pwm)
+  connect(dc_p, esc.p_in)
+  connect(dc_n, esc.n, motor.n)
+  connect(esc.p_out, motor.p)
+  connect(motor.shaft, prop.shaft)
+  connect(motor.housing, prop.support)
+  connect(prop.mount, mount)
+end
+
+"""
+Test fixture: holds a BodyPort at the NED origin, level, translating at a
+constant body-frame velocity and rotating at a constant body rate.
+Equivalent to a wind-tunnel stand with free-stream -v_body.
+"""
+component TestStand
+  port = BodyPort()
+  "Stand velocity, body frame"
+  parameter v_body::Velocity[3] = [0.0, 0.0, 0.0]
+  "Stand angular velocity, body frame"
+  parameter w_body::AngularVelocity[3] = [0.0, 0.0, 0.0]
+  "Force reaction measured by the stand, body frame"
+  variable F_meas::Force[3]
+  "Torque reaction measured by the stand about the reference point, body frame"
+  variable M_meas::Torque[3]
+relations
+  port.r = [0.0, 0.0, 0.0]
+  port.R = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+  port.v = v_body
+  port.w = w_body
+  F_meas = port.f
+  M_meas = port.tau
+end

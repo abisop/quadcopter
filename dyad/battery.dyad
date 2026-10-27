@@ -1,0 +1,57 @@
+"""
+LiPo battery pack, Thevenin equivalent circuit with one RC polarization branch.
+
+  v = n_cells * ocv(SOC) - R0 * I - v1
+  C1 * dv1/dt = I - v1 / R1
+  dSOC/dt = -I / (3600 * capacity)
+
+I is the discharge current (out of pin p). The cell open-circuit voltage is a
+smooth fit of a typical LiPo resting-voltage table (max error ~17 mV/cell):
+  ocv(s) = E0 + K1*s + K2*s^2 + K3*s^3 - A*exp(-B*s)
+"""
+component LiPoBattery
+  extends ElectricalComponents.Analog.Interfaces.OnePort
+  "Number of series cells"
+  parameter n_cells::Real = 3.0
+  "Rated capacity"
+  parameter capacity::Real(units = "A.h") = 3.0
+  "Initial state of charge (0..1)"
+  parameter SOC0::Real = 1.0
+  "Series (ohmic) resistance of the pack"
+  parameter R0::Resistance = 0.024
+  "Polarization resistance of the pack"
+  parameter R1::Resistance = 0.012
+  "Polarization capacitance of the pack"
+  parameter C1::Capacitance = 2500.0
+  "OCV fit: constant term (V/cell)"
+  parameter E0::Voltage = 3.7325
+  "OCV fit: linear coefficient (V/cell)"
+  parameter K1::Voltage = -0.03594
+  "OCV fit: quadratic coefficient (V/cell)"
+  parameter K2::Voltage = 0.45383
+  "OCV fit: cubic coefficient (V/cell)"
+  parameter K3::Voltage = 0.05359
+  "OCV fit: exponential amplitude (V/cell)"
+  parameter A_exp::Voltage = 0.45823
+  "OCV fit: exponential rate"
+  parameter B_exp::Real = 24.0
+  "State of charge"
+  variable SOC::Real
+  "Polarization voltage"
+  variable v1::Voltage
+  "Pack open-circuit voltage"
+  variable v_oc::Voltage
+  "Discharge current (out of pin p)"
+  variable I::Current
+  "Electrical power delivered"
+  variable P::Power
+relations
+  initial SOC = SOC0
+  initial v1 = 0.0
+  I = -i
+  v_oc = n_cells * (E0 + K1 * SOC + K2 * SOC ^ 2 + K3 * SOC ^ 3 - A_exp * exp(-B_exp * SOC))
+  v = v_oc - R0 * I - v1
+  C1 * der(v1) = I - v1 / R1
+  der(SOC) = -I / (3600 * capacity)
+  P = v * I
+end
