@@ -1,0 +1,16 @@
+# ArduCopter parameters for the Dyad 450-class quadcopter model (JSON SITL)
+# Load with: sim_vehicle.py ... --add-param-file=scripts/quad450.parm
+#
+# Frame: Quad X, motors 1..4 on SERVO1..4 (front-right CCW, rear-left CCW,
+# front-left CW, rear-right CW)
+FRAME_CLASS      1
+FRAME_TYPE       1
+# ESC model maps 1000..2000 us linearly to 0..100 % duty
+MOT_PWM_MIN      1000
+MOT_PWM_MAX      2000
+# 3S LiPo, 3000 mAh (model: LiPoBattery)
+MOT_BAT_VOLT_MAX 12.6
+MOT_BAT_VOLT_MIN 9.9
+BATT_CAPACITY    3000
+# Starting value for the hover thrust (model hovers at ~1417 us); learned in flight
+MOT_THST_HOVER   0.2

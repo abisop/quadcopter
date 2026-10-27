@@ -5,7 +5,7 @@
 
 
 @doc Markdown.doc"""
-   Quadcopter(; name, mass, arm_length, hub_height, z_foot, k_gear, yaw0, rho, wind_ned, __overrides)
+   Quadcopter(; name, mass, arm_length, hub_height, z_foot, k_gear, yaw0, r0, rho, wind_ned, CdA, __overrides)
 
 Quadcopter, ArduPilot Quad-X layout (FRAME_CLASS = 1, FRAME_TYPE = 1).
 
@@ -28,14 +28,16 @@ landing gear at the static spring deflection.
 | `z_foot`         | Foot height below the centre of mass                         | m  |   0.1 |
 | `k_gear`         | Landing-gear stiffness per foot                         | N/m  |   600.0 |
 | `yaw0`         | Initial heading (yaw)                         | rad  |   0.0 |
+| `r0`         | Initial NED position of the centre of mass (default: resting on the gear)                         | m  |   [0.0, 0.0, ...* k_gear))] |
 | `rho`         | Air density                         | kg/m3  |   1.225 |
 | `wind_ned`         | Wind velocity, NED                         | m/s  |   [0.0, 0.0, 0.0] |
+| `CdA`         | Fuselage drag area along body x, y, z                         | m2  |   [0.02, 0.02, 0.04] |
 
 ## Connectors
 
  * `pwm` - This connector represents a real signal as an input to a component ([`RealInput`](@ref))
 """
-@component function Quadcopter(; name = nothing, var"mass"=1.2, var"arm_length"=0.225, var"hub_height"=0.03, var"z_foot"=0.1, var"k_gear"=Float64(600.0), var"yaw0"=Float64(0.0), var"rho"=1.225, var"wind_ned"=[Float64(0.0), Float64(0.0), Float64(0.0)], __overrides = Dict{String, Any}())
+@component function Quadcopter(; name = nothing, var"mass"=1.2, var"arm_length"=0.225, var"hub_height"=0.03, var"z_foot"=0.1, var"k_gear"=Float64(600.0), var"yaw0"=Float64(0.0), var"rho"=1.225, var"wind_ned"=[Float64(0.0), Float64(0.0), Float64(0.0)], var"CdA"=[0.02, 0.02, 0.04], var"r0"=nothing, __overrides = Dict{String, Any}())
   isnothing(name) && throw(ArgumentError("""
     The `name` keyword must be provided. Please consider using the `@named` macro,
     like so:
@@ -62,6 +64,11 @@ landing gear at the static spring deflection.
   haskey(__overrides, "yaw0") && (yaw0 = pop!(__overrides, "yaw0"))
   haskey(__overrides, "rho") && (rho = pop!(__overrides, "rho"))
   haskey(__overrides, "wind_ned") && (wind_ned = pop!(__overrides, "wind_ned"))
+  haskey(__overrides, "CdA") && (CdA = pop!(__overrides, "CdA"))
+  haskey(__overrides, "r0") && (r0 = pop!(__overrides, "r0"))
+
+  ### Deferred keyword defaults (defaults referencing other keyword arguments)
+  isnothing(r0) && (r0 = [Float64(0.0), Float64(0.0), -(z_foot - mass * 9.80665 / (4 * k_gear))])
 
   ### Structural Parameters (functions)
 
@@ -95,12 +102,18 @@ landing gear at the static spring deflection.
   __local__yaw0 = yaw0
   append!(__params, @parameters (yaw0::Real), [description = "Initial heading (yaw)"])
   __dyad_seed_parameter!(__initial_conditions, __bindings, yaw0, __local__yaw0)
+  __local__r0 = r0
+  append!(__params, @parameters (r0[1:3]::Real), [description = "Initial NED position of the centre of mass (default: resting on the gear)"])
+  __dyad_seed_parameter!(__initial_conditions, __bindings, r0, __local__r0)
   __local__rho = rho
   append!(__params, @parameters (rho::Real), [description = "Air density", bounds = (0, Inf)])
   __dyad_seed_parameter!(__initial_conditions, __bindings, rho, __local__rho)
   __local__wind_ned = wind_ned
   append!(__params, @parameters (wind_ned[1:3]::Real), [description = "Wind velocity, NED"])
   __dyad_seed_parameter!(__initial_conditions, __bindings, wind_ned, __local__wind_ned)
+  __local__CdA = CdA
+  append!(__params, @parameters (CdA[1:3]::Real), [description = "Fuselage drag area along body x, y, z"])
+  __dyad_seed_parameter!(__initial_conditions, __bindings, CdA, __local__CdA)
 
   ### Final Parameters (assignments)
   __bindings[l_xy] = arm_length / sqrt(2.0)
@@ -118,10 +131,13 @@ landing gear at the static spring deflection.
   ### Components
   # Subcomponent airframe of type quadcopter.Airframe6DOF
   airframe_overrides = __pop_subcomponent_overrides!(__overrides, "airframe")
-  push!(__systems, @named airframe = quadcopter.Airframe6DOF(; m=mass, r0=[Float64(0.0), Float64(0.0), -(z_foot - mass * 9.80665 / (4 * k_gear))], rpy0=[Float64(0.0), Float64(0.0), yaw0], __overrides = airframe_overrides))
+  push!(__systems, @named airframe = quadcopter.Airframe6DOF(; m=mass, r0=r0, rpy0=[Float64(0.0), Float64(0.0), yaw0], __overrides = airframe_overrides))
   # Subcomponent gear of type quadcopter.LandingGear
   gear_overrides = __pop_subcomponent_overrides!(__overrides, "gear")
   push!(__systems, @named gear = quadcopter.LandingGear(; z_foot=z_foot, k=k_gear, __overrides = gear_overrides))
+  # Subcomponent drag of type quadcopter.FuselageDrag
+  drag_overrides = __pop_subcomponent_overrides!(__overrides, "drag")
+  push!(__systems, @named drag = quadcopter.FuselageDrag(; CdA=CdA, rho=rho, wind_ned=wind_ned, __overrides = drag_overrides))
   # Subcomponent battery of type quadcopter.LiPoBattery
   battery_overrides = __pop_subcomponent_overrides!(__overrides, "battery")
   push!(__systems, @named battery = quadcopter.LiPoBattery(; __overrides = battery_overrides))
@@ -152,7 +168,7 @@ landing gear at the static spring deflection.
   __assertions = []
 
   ### Equations
-  push!(__eqs, connect(airframe.port, gear.port, rotor1.mount, rotor2.mount, rotor3.mount, rotor4.mount))
+  push!(__eqs, connect(airframe.port, gear.port, drag.port, rotor1.mount, rotor2.mount, rotor3.mount, rotor4.mount))
   push!(__eqs, connect(battery.p, rotor1.dc_p, rotor2.dc_p, rotor3.dc_p, rotor4.dc_p))
   push!(__eqs, connect(battery.n, rotor1.dc_n, rotor2.dc_n, rotor3.dc_n, rotor4.dc_n, ground.g))
   push!(__eqs, connect(pwm[1], rotor1.pwm))

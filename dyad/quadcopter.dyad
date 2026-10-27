@@ -25,14 +25,19 @@ component Quadcopter
   parameter k_gear::TranslationalSpringConstant = 600.0
   "Initial heading (yaw)"
   parameter yaw0::Angle = 0.0
+  "Initial NED position of the centre of mass (default: resting on the gear)"
+  parameter r0::Position[3] = [0.0, 0.0, -(z_foot - mass * 9.80665 / (4 * k_gear))]
   "Air density"
   parameter rho::Density = 1.225
   "Wind velocity, NED"
   parameter wind_ned::Velocity[3] = [0.0, 0.0, 0.0]
+  "Fuselage drag area along body x, y, z"
+  parameter CdA::Area[3] = [0.02, 0.02, 0.04]
   "Hub offset along body x and y"
   final parameter l_xy::Length = arm_length / sqrt(2.0)
-  airframe = Airframe6DOF(m = mass, r0 = [0.0, 0.0, -(z_foot - mass * 9.80665 / (4 * k_gear))], rpy0 = [0.0, 0.0, yaw0])
+  airframe = Airframe6DOF(m = mass, r0 = r0, rpy0 = [0.0, 0.0, yaw0])
   gear = LandingGear(z_foot = z_foot, k = k_gear)
+  drag = FuselageDrag(CdA = CdA, rho = rho, wind_ned = wind_ned)
   battery = LiPoBattery()
   ground = ElectricalComponents.Analog.Basic.Ground()
   rotor1 = RotorUnit(r_hub = [l_xy, l_xy, -hub_height], spin = -1.0, wind_ned = wind_ned, rho = rho)
@@ -41,7 +46,7 @@ component Quadcopter
   rotor4 = RotorUnit(r_hub = [-l_xy, l_xy, -hub_height], spin = 1.0, wind_ned = wind_ned, rho = rho)
 relations
   # Mechanical: everything attaches to the airframe
-  connect(airframe.port, gear.port, rotor1.mount, rotor2.mount, rotor3.mount, rotor4.mount)
+  connect(airframe.port, gear.port, drag.port, rotor1.mount, rotor2.mount, rotor3.mount, rotor4.mount)
   # Electrical: common DC bus
   connect(battery.p, rotor1.dc_p, rotor2.dc_p, rotor3.dc_p, rotor4.dc_p)
   connect(battery.n, rotor1.dc_n, rotor2.dc_n, rotor3.dc_n, rotor4.dc_n, ground.g)
